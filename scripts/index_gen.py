@@ -2,6 +2,7 @@
 """
 Build lightnovel-crawler source index to use for update checking.
 """
+import check_sources
 import hashlib
 import json
 import os
@@ -74,8 +75,8 @@ session = cloudscraper.create_scraper()
 INDEX_DATA = {
     "v": int(time.time()),
     "app": {
-        "windows": "https://rebrand.ly/lncrawl",
-        "linux": "https://rebrand.ly/lncrawl-linux",
+        "windows": "https://go.bitanon.dev/lncrawl-windows",
+        "linux": "https://go.bitanon.dev/lncrawl-linux",
     },
     "rejected": {},
     "supported": {},
@@ -83,7 +84,7 @@ INDEX_DATA = {
 }
 
 print("-" * 50)
-res = session.get("https://pypi.org/pypi/lightnovel-crawler/json")
+res = session.get("https://go.bitanon.dev/lncrawl-pip", allow_redirects=True)
 res.raise_for_status()
 pypi_data = res.json()
 print("Latest version:", pypi_data["info"]["version"])
@@ -111,8 +112,11 @@ except ImportError:
 
 assert SOURCES_FOLDER.is_dir()
 
+print('Getting rejected sources')
+rejected_sources = check_sources.main()
 with open(REJECTED_FILE, encoding="utf8") as fp:
-    rejected_sources = json.load(fp)
+    rejected_sources.update(json.load(fp))
+print("-" * 50)
 
 username_cache = {}
 try:

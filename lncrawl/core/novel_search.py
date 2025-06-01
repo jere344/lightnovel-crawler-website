@@ -4,6 +4,7 @@ To search for novels in selected sources
 import atexit
 import logging
 import time
+from threading import Event
 from concurrent.futures import Future
 from difflib import SequenceMatcher
 from multiprocessing import Manager, Process
@@ -14,7 +15,7 @@ from slugify import slugify
 
 CONCURRENCY = 25
 MAX_RESULTS = 10
-SEARCH_TIMEOUT = 20
+SEARCH_TIMEOUT = 30
 
 logger = logging.getLogger(__name__)
 
@@ -43,26 +44,31 @@ def _search_process(results: list, link: str, file_path: str, query: str):
 
 
 # This runs in a thread to execute the processes
-def _run(p: Process, hostname: str):
+def _run(p: Process, hostname: str, signal: Event):
     from .exeptions import LNException
     start_time = time.time()
     try:
         atexit.register(p.kill)
         p.start()
-        p.join(SEARCH_TIMEOUT)
-        if p.is_alive():
-            raise LNException(f"[{hostname}] Timeout")
+        for _ in range(0, SEARCH_TIMEOUT, 1):
+            if signal.is_set():
+                break
+            if not p.is_alive():
+                break
+            p.join(1)
+        else:
+            if p.is_alive():
+                raise LNException(f"[{hostname}] Timeout")
     finally:
         atexit.unregister(p.kill)
         p.kill()
-        run_time = round(time.time() - start_time)
-        logging.debug(f"[{hostname}] {run_time} seconds")
+    return (start_time, hostname)
 
 
 def search_novels(app):
     from ..models import CombinedSearchResult, SearchResult
     from .app import App
-    from .sources import crawler_list
+    from .sources import crawler_list, rejected_sources
     from .taskman import TaskManager
 
     assert isinstance(app, App)
@@ -76,8 +82,12 @@ def search_novels(app):
 
     # Create tasks for the queue
     checked = set()
+    signal = Event()
     futures: List[Future] = []
     for link in app.crawler_links:
+        if link in rejected_sources:
+            continue
+
         hostname = urlparse(link).hostname
         CrawlerType = crawler_list.get(hostname or '')
         if CrawlerType in checked:
@@ -95,24 +105,32 @@ def search_novels(app):
             ),
         )
 
-        f = taskman.submit_task(_run, p, hostname)
+        f = taskman.submit_task(
+            _run, p, hostname, signal
+        )
         futures.append(f)
 
     # Wait for all tasks to finish
     try:
         app.progress = 0
-        for _ in taskman.resolve_as_generator(
+        for start_time, hostname in taskman.resolve_as_generator(
             futures,
             unit='source',
             desc='Search',
             timeout=SEARCH_TIMEOUT,
         ):
             app.progress += 1
+            run_time = round(time.time() - start_time)
+            logging.debug(f"[{hostname}] {run_time} seconds")
     except KeyboardInterrupt:
         pass
     except Exception:
         if logger.isEnabledFor(logging.DEBUG):
             logger.exception('Search failed!')
+
+    # Force stop all tasks
+    signal.set()
+    taskman.shutdown(True)
 
     # Combine the search results
     combined: Dict[str, List[SearchResult]] = {}
